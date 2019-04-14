@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
+	"time"
 
 	"github.com/rsocket/rsocket-go"
 	"github.com/rsocket/rsocket-go/common/logger"
@@ -15,6 +17,7 @@ import (
 )
 
 func init() {
+	rand.Seed(time.Now().UnixNano())
 	go func() {
 		log.Println(http.ListenAndServe(":4444", nil))
 	}()
@@ -22,7 +25,7 @@ func init() {
 
 func main() {
 	logger.SetLoggerLevel(logger.LogLevelInfo)
-	logger.SetLoggerLevel(logger.LogLevelDebug)
+	//logger.SetLoggerLevel(logger.LogLevelDebug)
 	err := createEchoServer("127.0.0.1", 7878)
 	panic(err)
 }

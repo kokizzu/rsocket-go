@@ -4,16 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
+	"github.com/rsocket/rsocket-go/common"
 	"github.com/rsocket/rsocket-go/common/logger"
 	"github.com/rsocket/rsocket-go/payload"
 	"github.com/rsocket/rsocket-go/rx"
 )
 
 const (
-	defaultMinActives = 3
-	defaultMaxActives = 100
+	effort                = 5
+	defaultMinActives     = 3
+	defaultMaxActives     = 100
+	defaultLowerQuantile  = 0.2
+	defaultHigherQuantile = 0.8
+	defaultExpFactor      = 4.0
 )
 
 var (
@@ -23,11 +29,12 @@ var (
 )
 
 type balancer struct {
-	seq                    int
-	mu                     *sync.Mutex
-	actives                []*availabilitySocket
-	suppliers              *socketSupplierPool
-	minActives, maxActives int
+	mu                            *sync.Mutex
+	actives                       []*weightedSocket
+	suppliers                     *socketSupplierPool
+	minActives, maxActives        int
+	expFactor                     float64
+	lowerQuantile, higherQuantile common.Quantile
 }
 
 func (p *balancer) FireAndForget(msg payload.Payload) {
@@ -71,10 +78,36 @@ func (p *balancer) next() ClientSocket {
 	if n < 1 {
 		return mustFailed
 	}
-	// TODO: support more lb algorithm.
-	// simple RoundRobin
-	p.seq = (p.seq + 1) % n
-	return p.actives[p.seq]
+	if n == 1 {
+		first := p.actives[0]
+		logger.Infof("choose=%s \n", first)
+		return first
+	}
+	var rsc1, rsc2 *weightedSocket
+	for i := 0; i < effort; i++ {
+		i1 := common.RandIntn(n)
+		i2 := common.RandIntn(n - 1)
+		if i2 >= i1 {
+			i2++
+		}
+		rsc1 = p.actives[i1]
+		rsc2 = p.actives[i2]
+		if rsc1.availability > 0 && rsc2.availability > 0 {
+			break
+		}
+		if i+1 == effort && p.suppliers.Len() > 0 {
+			p.acquire()
+		}
+	}
+	w1 := p.algorithmicWeight(rsc1)
+	w2 := p.algorithmicWeight(rsc2)
+
+	if w1 < w2 {
+		logger.Infof("choose=%s, giveup=%s, %.8f > %.8f\n", rsc2, rsc1, w2, w1)
+		return rsc2
+	}
+	logger.Infof("choose=%s, giveup=%s, %.8f > %.8f\n", rsc1, rsc2, w1, w2)
+	return rsc1
 }
 
 func (p *balancer) refresh() {
@@ -96,7 +129,7 @@ func (p *balancer) acquire() bool {
 		logger.Debugf("rsocket: no socket supplier available\n")
 		return false
 	}
-	sk, err := supplier.create()
+	sk, err := supplier.create(p.lowerQuantile, p.higherQuantile)
 	if err != nil {
 		_ = p.suppliers.returnSupplier(supplier)
 		return false
@@ -104,7 +137,7 @@ func (p *balancer) acquire() bool {
 	p.actives = append(p.actives, sk)
 	// TODO: ugly code
 	merge := &struct {
-		sk *availabilitySocket
+		sk *weightedSocket
 		ba *balancer
 	}{sk, p}
 	sk.origin.(*duplexRSocket).tp.OnClose(func() {
@@ -117,7 +150,7 @@ func (p *balancer) acquire() bool {
 	return true
 }
 
-func (p *balancer) unload(socket *availabilitySocket) {
+func (p *balancer) unload(socket *weightedSocket) {
 	idx := -1
 	for i := 0; i < len(p.actives); i++ {
 		if p.actives[i] == socket {
@@ -185,13 +218,43 @@ func (*mustFailedSocket) RequestChannel(msgs rx.Publisher) rx.Flux {
 		})
 }
 
+func (p *balancer) algorithmicWeight(socket *weightedSocket) float64 {
+	if socket.availability == 0 {
+		return 0
+	}
+	pendings := float64(socket.pending)
+	latency := socket.getPredictedLatency()
+	//logger.Infof("%s: latency=%f\n", socket, latency)
+	low := p.lowerQuantile.Estimation()
+	high := math.Max(p.higherQuantile.Estimation(), low*1.001)
+	bandWidth := math.Max(high-low, 1)
+	if latency < low {
+		alpha := (low - latency) / bandWidth
+		bonusFactor := math.Pow(1+alpha, p.expFactor)
+		latency /= bonusFactor
+	} else if latency > high {
+		alpha := (latency - high) / bandWidth
+		penaltyFactor := math.Pow(1+alpha, p.expFactor)
+		latency *= penaltyFactor
+	}
+	w := socket.availability / (1 + latency*(pendings+1))
+	/*logger.Infof("%s: w=%f, high=%f, low=%f, availability=%f, pending=%f, latency=%f, \n",
+	socket, w,
+	high, low,
+	socket.availability, pendings, latency)*/
+	return w
+}
+
 func newBalancer(first *socketSupplier, others ...*socketSupplier) *balancer {
 	return &balancer{
-		mu:         &sync.Mutex{},
-		actives:    make([]*availabilitySocket, 0),
-		suppliers:  newSocketPool(first, others...),
-		minActives: defaultMinActives,
-		maxActives: defaultMaxActives,
+		mu:             &sync.Mutex{},
+		actives:        make([]*weightedSocket, 0),
+		suppliers:      newSocketPool(first, others...),
+		minActives:     defaultMinActives,
+		maxActives:     defaultMaxActives,
+		lowerQuantile:  common.NewFrugalQuantile(defaultLowerQuantile, 1),
+		higherQuantile: common.NewFrugalQuantile(defaultHigherQuantile, 1),
+		expFactor:      defaultExpFactor,
 	}
 }
 
