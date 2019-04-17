@@ -5,10 +5,14 @@ import (
 	"io"
 
 	"github.com/rsocket/rsocket-go/framing"
+	"github.com/rsocket/rsocket-go/payload"
 )
 
 // FrameHandler is alias of frame handler.
 type FrameHandler = func(frame framing.Frame) (err error)
+
+// PayloadHandler is alias of payload handler.
+type PayloadHandler = func(pl payload.Payload) (err error)
 
 // Transport is RSocket transport which is used to carry RSocket frames.
 type Transport interface {
@@ -29,8 +33,8 @@ type Transport interface {
 	HandleRequestStream(handler FrameHandler)
 	// HandleRequestChannel register RequestChannel frame handler.
 	HandleRequestChannel(handler FrameHandler)
-	// HandlePayload register Payload frame handler.
-	HandlePayload(handler FrameHandler)
+	// HandlePayload register handler for processing Payload.
+	HandlePayload(handler PayloadHandler)
 	// HandleRequestN register RequestN frame handler.
 	HandleRequestN(handler FrameHandler)
 	// HandleError register Error frame handler.

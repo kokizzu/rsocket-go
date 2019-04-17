@@ -458,32 +458,41 @@ func (p *duplexRSocket) start() {
 		return
 	})
 
-	p.tp.HandlePayload(func(input framing.Frame) (err error) {
-		f := input.(*framing.FramePayload)
-		sid := f.Header().StreamID()
+	p.tp.HandlePayload(func(input payload.Payload) (err error) {
+		var sid uint32
+		var fg framing.FrameFlag
+		switch pl := input.(type) {
+		case *framing.FramePayload:
+			sid = pl.Header().StreamID()
+			fg = pl.Header().Flag()
+		case *transport.FragmentPayload:
+			sid = pl.StreamID()
+			fg = pl.Flag()
+		default:
+			panic("unreachable")
+		}
 		v, ok := p.messages.load(sid)
 		if !ok {
 			return fmt.Errorf("non-exist stream id: %d", sid)
 		}
 		switch v.mode {
 		case msgStoreModeRequestResponse:
-			if err := v.receiving.(rx.MonoProducer).Success(f); err != nil {
-				f.Release()
+			if err := v.receiving.(rx.MonoProducer).Success(input); err != nil {
+				input.Release()
 				logger.Warnf("produce payload failed: %s\n", err.Error())
 			}
 		case msgStoreModeRequestStream, msgStoreModeRequestChannel:
 			receiving := v.receiving.(rx.Producer)
-			fg := f.Header().Flag()
 			if fg.Check(framing.FlagNext) {
-				if err := receiving.Next(f); err != nil {
-					f.Release()
+				if err := receiving.Next(input); err != nil {
+					input.Release()
 					logger.Warnf("produce payload failed: %s\n", err.Error())
 				}
 			}
 			if fg.Check(framing.FlagComplete) {
 				receiving.Complete()
 				if !fg.Check(framing.FlagNext) {
-					f.Release()
+					input.Release()
 				}
 			}
 		default:
