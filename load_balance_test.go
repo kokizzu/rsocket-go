@@ -1,4 +1,4 @@
-package test
+package rsocket
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsocket/rsocket-go"
 	"github.com/rsocket/rsocket-go/payload"
 	"github.com/rsocket/rsocket-go/rx"
 	"github.com/stretchr/testify/assert"
@@ -15,11 +14,12 @@ import (
 
 func TestLoadBalanceClient(t *testing.T) {
 	setup := payload.NewString("hello", "world")
-	cli, err := rsocket.Connect().SetupPayload(setup).
+	cli, err := Connect().SetupPayload(setup).
 		Transport(
-			"tcp://127.0.0.1:7878",
+			//"tcp://127.0.0.1:7878",
 			"tcp://127.0.0.1:8000",
-			"tcp://127.0.0.1:8001",
+			//"tcp://127.0.0.1:8001",
+			"tcp://127.0.0.1:8002",
 		).
 		Start()
 	if err != nil {
@@ -28,8 +28,18 @@ func TestLoadBalanceClient(t *testing.T) {
 	defer func() {
 		_ = cli.Close()
 	}()
-	for i := 0; i < 1; i++ {
-		time.Sleep(1 * time.Second)
+
+	go func() {
+		time.Sleep(3 * time.Second)
+		cli.(*balancer).Rebalance("tcp://127.0.0.1:8000", "tcp://127.0.0.1:8001", "tcp://127.0.0.1:8003")
+		time.Sleep(6 * time.Second)
+		cli.(*balancer).Rebalance("tcp://127.0.0.1:8000", "tcp://127.0.0.1:8001", "tcp://127.0.0.1:8003", "tcp://127.0.0.1:8004")
+		time.Sleep(9 * time.Second)
+		cli.(*balancer).Rebalance("tcp://127.0.0.1:8002")
+	}()
+
+	for i := 0; i < 1000; i++ {
+		time.Sleep(500 * time.Millisecond)
 		cli.RequestResponse(payload.NewString("hello", fmt.Sprintf("%d", i))).
 			DoOnError(func(ctx context.Context, err error) {
 				log.Println("oops:", err)

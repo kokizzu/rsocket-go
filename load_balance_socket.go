@@ -114,10 +114,10 @@ func (p *weightedSocket) latency2(start int64) {
 	rtt := float64(end - start)
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	logger.Infof("RTT: socket=%s, rtt=%f\n", p, rtt)
 	p.median.Insert(rtt)
 	p.lowerQuantile.Insert(rtt)
 	p.higherQuantile.Insert(rtt)
+	logger.Debugf("RTT: socket=%s, rtt=%f\n", p, rtt)
 }
 
 func (p *weightedSocket) getPredictedLatency() float64 {
@@ -145,7 +145,7 @@ func (p *weightedSocket) getPredictedLatency() float64 {
 			weight = prediction
 		}
 	}
-	logger.Infof("weight: %f\n", weight)
+	logger.Debugf("weight: %s, %f\n", p, weight)
 	return weight
 }
 

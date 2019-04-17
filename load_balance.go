@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/rsocket/rsocket-go/common"
@@ -15,7 +16,7 @@ import (
 
 const (
 	effort                = 5
-	defaultMinActives     = 3
+	defaultMinActives     = 30
 	defaultMaxActives     = 100
 	defaultLowerQuantile  = 0.2
 	defaultHigherQuantile = 0.8
@@ -29,6 +30,7 @@ var (
 )
 
 type balancer struct {
+	bu                            *implClientBuilder
 	mu                            *sync.Mutex
 	actives                       []*weightedSocket
 	suppliers                     *socketSupplierPool
@@ -70,6 +72,46 @@ func (p *balancer) Close() (err error) {
 	return
 }
 
+func (p *balancer) Rebalance(uris ...string) error {
+	p.mu.Lock()
+	defer func() {
+		logger.Infof("===================== REBALANCE =======================\n")
+		p.mu.Unlock()
+	}()
+	newest := make(map[string]*socketSupplier)
+	for _, uri := range uris {
+		newest[uri] = newSocketSupplier(p.bu, uri)
+	}
+
+	if len(newest) < 1 {
+		return 
+
+	}
+
+	removes := make([]int, 0)
+	for i, l := 0, len(p.actives); i < l; i++ {
+		uri := p.actives[i].supplier.u
+		if _, ok := newest[uri]; !ok {
+			removes = append(removes, i)
+		}
+	}
+	for _, idx := range removes {
+		rm := p.actives[idx]
+		p.actives[idx] = nil
+		logger.Debugf("remove then close actived socket: %s\n", rm)
+		_ = rm.Close()
+	}
+	survives := make([]*weightedSocket, 0)
+	for i, l := 0, len(p.actives); i < l; i++ {
+		it := p.actives[i]
+		if it != nil {
+			survives = append(survives, it)
+		}
+	}
+	p.actives = survives
+	p.suppliers.reset(newest)
+}
+
 func (p *balancer) next() ClientSocket {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -80,9 +122,20 @@ func (p *balancer) next() ClientSocket {
 	}
 	if n == 1 {
 		first := p.actives[0]
-		logger.Infof("choose=%s \n", first)
+		logger.Debugf("choose=%s \n", first)
 		return first
 	}
+
+	// TODO: remove debug code
+	// log for debug begin
+	sb := strings.Builder{}
+	for _, value := range p.actives {
+		sb.WriteString(value.supplier.u)
+		sb.WriteByte(';')
+	}
+	logger.Debugf("actives: %s\n", sb.String())
+	// log for debug end
+
 	var rsc1, rsc2 *weightedSocket
 	for i := 0; i < effort; i++ {
 		i1 := common.RandIntn(n)
@@ -95,7 +148,7 @@ func (p *balancer) next() ClientSocket {
 		if rsc1.availability > 0 && rsc2.availability > 0 {
 			break
 		}
-		if i+1 == effort && p.suppliers.Len() > 0 {
+		if i+1 == effort && p.suppliers.size() > 0 {
 			p.acquire()
 		}
 	}
@@ -103,10 +156,10 @@ func (p *balancer) next() ClientSocket {
 	w2 := p.algorithmicWeight(rsc2)
 
 	if w1 < w2 {
-		logger.Infof("choose=%s, giveup=%s, %.8f > %.8f\n", rsc2, rsc1, w2, w1)
+		logger.Debugf("choose=%s, giveup=%s, %.8f > %.8f\n", rsc2, rsc1, w2, w1)
 		return rsc2
 	}
-	logger.Infof("choose=%s, giveup=%s, %.8f > %.8f\n", rsc1, rsc2, w1, w2)
+	logger.Debugf("choose=%s, giveup=%s, %.8f > %.8f\n", rsc1, rsc2, w1, w2)
 	return rsc1
 }
 
@@ -117,18 +170,19 @@ func (p *balancer) refresh() {
 		// TODO: reduce active sockets
 	case n < p.minActives:
 		d := p.minActives - n
-		for i := 0; i < d && p.suppliers.Len() > 0; i++ {
+		for i := 0; i < d && p.suppliers.size() > 0; i++ {
 			p.acquire()
 		}
 	}
 }
 
 func (p *balancer) acquire() bool {
-	supplier, ok := p.suppliers.Next()
+	supplier, ok := p.suppliers.next()
 	if !ok {
 		logger.Debugf("rsocket: no socket supplier available\n")
 		return false
 	}
+	logger.Debugf("choose supplier %s\n", supplier)
 	sk, err := supplier.create(p.lowerQuantile, p.higherQuantile)
 	if err != nil {
 		_ = p.suppliers.returnSupplier(supplier)
@@ -143,7 +197,7 @@ func (p *balancer) acquire() bool {
 	sk.origin.(*duplexRSocket).tp.OnClose(func() {
 		merge.ba.mu.Lock()
 		defer merge.ba.mu.Unlock()
-		logger.Infof("rsocket: unload %s\n", merge.sk)
+		logger.Debugf("rsocket: unload %s\n", merge.sk)
 		merge.ba.unload(merge.sk)
 		_ = merge.ba.suppliers.returnSupplier(merge.sk.supplier)
 	})
@@ -245,11 +299,12 @@ func (p *balancer) algorithmicWeight(socket *weightedSocket) float64 {
 	return w
 }
 
-func newBalancer(first *socketSupplier, others ...*socketSupplier) *balancer {
+func newBalancer(bu *implClientBuilder, pool *socketSupplierPool) *balancer {
 	return &balancer{
+		bu:             bu,
 		mu:             &sync.Mutex{},
 		actives:        make([]*weightedSocket, 0),
-		suppliers:      newSocketPool(first, others...),
+		suppliers:      pool,
 		minActives:     defaultMinActives,
 		maxActives:     defaultMaxActives,
 		lowerQuantile:  common.NewFrugalQuantile(defaultLowerQuantile, 1),
@@ -278,5 +333,6 @@ func (p *balancerStarter) Start() (ClientSocket, error) {
 	for _, uri := range p.uris {
 		suppliers = append(suppliers, newSocketSupplier(p.bu, uri))
 	}
-	return newBalancer(suppliers[0], suppliers[1:]...), nil
+	pool := newSocketPool(suppliers...)
+	return newBalancer(p.bu, pool), nil
 }
