@@ -2,9 +2,10 @@ package framing
 
 import (
 	"errors"
-	"github.com/rsocket/rsocket-go/common"
 	"io"
 	"strings"
+
+	"github.com/rsocket/rsocket-go/common"
 )
 
 var errIncompleteFrame = errors.New("incomplete frame")
@@ -71,7 +72,7 @@ func (f FrameFlag) String() string {
 		foo = append(foo, "CL")
 	}
 	if f.Check(FlagFollow) {
-		foo = append(foo, "FRS)")
+		foo = append(foo, "FRS")
 	}
 	if f.Check(FlagMetadata) {
 		foo = append(foo, "M")

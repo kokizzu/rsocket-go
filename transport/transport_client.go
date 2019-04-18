@@ -11,10 +11,9 @@ import (
 )
 
 type clientTransportImpl struct {
-	conn      conn
-	handlers  *sync.Map
-	fnClose   []func()
-	fragments map[uint32]interface{}
+	conn     conn
+	handlers *sync.Map
+	fnClose  []func()
 }
 
 func (p *clientTransportImpl) Send(frame framing.Frame) (err error) {
@@ -33,54 +32,32 @@ func (p *clientTransportImpl) Close() error {
 	return p.conn.Close()
 }
 
-func (p *clientTransportImpl) Start(ctx context.Context) error {
-	p.conn.Handle(func(ctx context.Context, frame framing.Frame) (err error) {
-		header := frame.Header()
-		typo := header.Type()
-		// respond keepalive
-		if typo == framing.FrameTypeKeepalive {
-			p.HandleKeepalive(ctx, frame)
-			return nil
-		}
-		// skip invalid metadata push
-		if typo == framing.FrameTypeMetadataPush && header.StreamID() != 0 {
-			frame.Release()
-			logger.Warnf("rsocket.Transport: omit MetadataPush with non-zero stream id %d\n", header.StreamID())
-			return nil
-		}
-
-		// process payload frames
-		if typo == framing.FrameTypePayload {
-			sid := header.StreamID()
-			if found, ok := p.fragments[sid]; ok {
-				fr := found.(*FragmentPayload)
-				finish := fr.push(frame.(*framing.FramePayload))
-				if !finish {
-					return nil
-				}
-				delete(p.fragments, sid)
-				if h, ok := p.handlers.Load(typo); ok {
-					return h.(PayloadHandler)(fr)
-				}
-				// missing handler
-				frame.Release()
-				return fmt.Errorf("missing frame handler: type=%s", typo)
-			} else if header.Flag().Check(framing.FlagFollow) {
-				fp := newFragmentPayload(frame.(*framing.FramePayload))
-				p.fragments[sid] = fp
-				return nil
-			}
-		}
-
-		// trigger handler
-		if h, ok := p.handlers.Load(typo); ok {
-			return h.(FrameHandler)(frame)
-		}
-		// missing handler
+func (p *clientTransportImpl) onFrame(ctx context.Context, frame framing.Frame) (err error) {
+	header := frame.Header()
+	typo := header.Type()
+	// respond keepalive
+	if typo == framing.FrameTypeKeepalive {
+		p.HandleKeepalive(ctx, frame)
+		return nil
+	}
+	// skip invalid metadata push
+	if typo == framing.FrameTypeMetadataPush && header.StreamID() != 0 {
 		frame.Release()
-		return fmt.Errorf("missing frame handler: type=%s", typo)
+		logger.Warnf("rsocket.Transport: omit MetadataPush with non-zero stream id %d\n", header.StreamID())
+		return nil
+	}
 
-	})
+	// trigger handler
+	if h, ok := p.handlers.Load(typo); ok {
+		return h.(FrameHandler)(frame)
+	}
+	// missing handler
+	frame.Release()
+	return fmt.Errorf("missing frame handler: type=%s", typo)
+}
+
+func (p *clientTransportImpl) Start(ctx context.Context) error {
+	p.conn.Handle(p.onFrame)
 	defer func() {
 		for _, fn := range p.fnClose {
 			fn()
@@ -117,7 +94,7 @@ func (p *clientTransportImpl) HandleRequestChannel(handler FrameHandler) {
 	p.handlers.Store(framing.FrameTypeRequestChannel, handler)
 }
 
-func (p *clientTransportImpl) HandlePayload(handler PayloadHandler) {
+func (p *clientTransportImpl) HandlePayload(handler FrameHandler) {
 	p.handlers.Store(framing.FrameTypePayload, handler)
 }
 
@@ -154,9 +131,8 @@ func (p *clientTransportImpl) HandleKeepalive(ctx context.Context, frame framing
 
 func newTransportClient(c conn) *clientTransportImpl {
 	return &clientTransportImpl{
-		conn:      c,
-		handlers:  &sync.Map{},
-		fnClose:   make([]func(), 0),
-		fragments: make(map[uint32]interface{}, 0),
+		conn:     c,
+		handlers: &sync.Map{},
+		fnClose:  make([]func(), 0),
 	}
 }

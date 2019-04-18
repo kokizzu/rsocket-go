@@ -14,6 +14,7 @@ import (
 func main() {
 	logger.SetLoggerLevel(logger.LogLevelDebug)
 	cli, err := rsocket.Connect().
+		SetupPayload(payload.NewString("hello", "worle")).
 		Transport("tcp://127.0.0.1:8088").
 		Start()
 	if err != nil {

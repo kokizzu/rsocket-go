@@ -35,6 +35,8 @@ type (
 	// ClientBuilder can be used to build v RSocket client.
 	ClientBuilder interface {
 		ClientTransportBuilder
+		// Fragment set fragmentation size which default is 16_777_215(16MB).
+		Fragment(mtu int) ClientBuilder
 		// KeepAlive defines current client keepalive settings.
 		KeepAlive(tickPeriod, ackTimeout time.Duration, missedAcks int) ClientBuilder
 		// DataMimeType is used to set payload data MIME type.
@@ -68,6 +70,7 @@ type (
 // Connect create v new RSocket client builder with default settings.
 func Connect() ClientBuilder {
 	return &implClientBuilder{
+		fragment:             common.MaxUint24,
 		keepaliveInteval:     common.DefaultKeepaliveInteval,
 		keepaliveMaxLifetime: common.DefaultKeepaliveMaxLifetime,
 		dataMimeType:         defaultMimeType,
@@ -77,6 +80,7 @@ func Connect() ClientBuilder {
 }
 
 type implClientBuilder struct {
+	fragment             int
 	addr                 string
 	keepaliveInteval     time.Duration
 	keepaliveMaxLifetime time.Duration
@@ -86,6 +90,11 @@ type implClientBuilder struct {
 	setupMetadata        []byte
 	acceptor             ClientSocketAcceptor
 	onCloses             []func()
+}
+
+func (p *implClientBuilder) Fragment(mtu int) ClientBuilder {
+	p.fragment = mtu
+	return p
 }
 
 func (p *implClientBuilder) clone() ClientBuilder {

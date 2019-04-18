@@ -10,6 +10,7 @@ import (
 
 	"github.com/rsocket/rsocket-go/common"
 	"github.com/rsocket/rsocket-go/common/logger"
+	"github.com/rsocket/rsocket-go/fragmentation"
 	"github.com/rsocket/rsocket-go/framing"
 	"github.com/rsocket/rsocket-go/payload"
 	"github.com/rsocket/rsocket-go/rx"
@@ -29,6 +30,8 @@ type duplexRSocket struct {
 	messages  *publishersMap
 	scheduler rx.Scheduler
 	sids      *genStreamID
+
+	fragments *sync.Map // key=frameType+streamID, value=Joiner
 }
 
 func (p *duplexRSocket) releaseAll() {
@@ -403,103 +406,124 @@ func (p *duplexRSocket) bindResponder(socket RSocket) {
 	p.tp.HandleRequestChannel(p.respondRequestChannel)
 }
 
-func (p *duplexRSocket) start() {
-	p.tp.HandleCancel(func(frame framing.Frame) error {
-		defer frame.Release()
-		sid := frame.Header().StreamID()
-		if v, ok := p.messages.load(sid); ok {
-			v.sending.(rx.Disposable).Dispose()
-		}
-		return nil
-	})
-	p.tp.HandleError(func(input framing.Frame) (err error) {
-		f := input.(*framing.FrameError)
-		logger.Errorf("handle error frame: %s\n", f)
-		sid := f.Header().StreamID()
-		v, ok := p.messages.load(sid)
-		if !ok {
-			return fmt.Errorf("invalid stream id: %d", sid)
-		}
+func (p *duplexRSocket) onFrameCancel(frame framing.Frame) error {
+	defer frame.Release()
+	sid := frame.Header().StreamID()
+	if v, ok := p.messages.load(sid); ok {
+		v.sending.(rx.Disposable).Dispose()
+	}
+	return nil
+}
 
-		switch v.mode {
-		case msgStoreModeRequestResponse:
-			v.receiving.(rx.Mono).DoFinally(func(ctx context.Context, st rx.SignalType) {
-				f.Release()
-			})
-			v.receiving.(rx.MonoProducer).Error(f)
-		case msgStoreModeRequestStream, msgStoreModeRequestChannel:
-			v.receiving.(rx.Flux).DoFinally(func(ctx context.Context, st rx.SignalType) {
-				f.Release()
-			})
-			v.receiving.(rx.Producer).Error(f)
-		default:
-			panic("unreachable")
+func (p *duplexRSocket) onFrameError(input framing.Frame) (err error) {
+	f := input.(*framing.FrameError)
+	logger.Errorf("handle error frame: %s\n", f)
+	sid := f.Header().StreamID()
+	v, ok := p.messages.load(sid)
+	if !ok {
+		return fmt.Errorf("invalid stream id: %d", sid)
+	}
+	switch v.mode {
+	case msgStoreModeRequestResponse:
+		v.receiving.(rx.Mono).DoFinally(func(ctx context.Context, st rx.SignalType) {
+			f.Release()
+		})
+		v.receiving.(rx.MonoProducer).Error(f)
+	case msgStoreModeRequestStream, msgStoreModeRequestChannel:
+		v.receiving.(rx.Flux).DoFinally(func(ctx context.Context, st rx.SignalType) {
+			f.Release()
+		})
+		v.receiving.(rx.Producer).Error(f)
+	default:
+		panic("unreachable")
+	}
+	return
+}
+
+func (p *duplexRSocket) onFrameRequestN(input framing.Frame) (err error) {
+	defer input.Release()
+	f := input.(*framing.FrameRequestN)
+	sid := f.Header().StreamID()
+	v, ok := p.messages.load(sid)
+	if !ok {
+		return fmt.Errorf("non-exists stream id: %d", sid)
+	}
+	// RequestN is always for sending.
+	target := v.sending.(rx.Subscription)
+	n := int(f.N())
+	switch v.mode {
+	case msgStoreModeRequestStream, msgStoreModeRequestChannel:
+		target.Request(n)
+	default:
+		panic("unreachable")
+	}
+	return
+}
+
+func (p *duplexRSocket) doFragment(input fragmentation.HeaderAndPayload) (out fragmentation.HeaderAndPayload, ok bool) {
+	h := input.Header()
+	k := uint64(h.Type())<<32 | uint64(h.StreamID())
+	v, exist := p.fragments.Load(k)
+	if exist {
+		joiner := v.(fragmentation.Joiner)
+		ok = joiner.Push(input)
+		if ok {
+			out = joiner
 		}
 		return
-	})
-
-	p.tp.HandleRequestN(func(input framing.Frame) (err error) {
-		defer input.Release()
-		f := input.(*framing.FrameRequestN)
-		sid := f.Header().StreamID()
-		v, ok := p.messages.load(sid)
-		if !ok {
-			return fmt.Errorf("non-exists stream id: %d", sid)
-		}
-		// RequestN is always for sending.
-		target := v.sending.(rx.Subscription)
-		n := int(f.N())
-		switch v.mode {
-		case msgStoreModeRequestStream, msgStoreModeRequestChannel:
-			target.Request(n)
-		default:
-			panic("unreachable")
-		}
+	}
+	ok = !h.Flag().Check(framing.FlagFollow)
+	if ok {
+		out = input
 		return
-	})
+	}
+	p.fragments.Store(k, fragmentation.NewJoiner(input))
+	return
+}
 
-	p.tp.HandlePayload(func(input payload.Payload) (err error) {
-		var sid uint32
-		var fg framing.FrameFlag
-		switch pl := input.(type) {
-		case *framing.FramePayload:
-			sid = pl.Header().StreamID()
-			fg = pl.Header().Flag()
-		case *transport.FragmentPayload:
-			sid = pl.StreamID()
-			fg = pl.Flag()
-		default:
-			panic("unreachable")
+func (p *duplexRSocket) onFramePayload(in framing.Frame) (err error) {
+	pl, ok := p.doFragment(in.(*framing.FramePayload))
+	if !ok {
+		return
+	}
+	sid := pl.Header().StreamID()
+	fg := pl.Header().Flag()
+	v, ok := p.messages.load(sid)
+	if !ok {
+		pl.Release()
+		return fmt.Errorf("non-exist stream id: %d", sid)
+	}
+	switch v.mode {
+	case msgStoreModeRequestResponse:
+		if err := v.receiving.(rx.MonoProducer).Success(pl); err != nil {
+			pl.Release()
+			logger.Warnf("produce payload failed: %s\n", err.Error())
 		}
-		v, ok := p.messages.load(sid)
-		if !ok {
-			return fmt.Errorf("non-exist stream id: %d", sid)
-		}
-		switch v.mode {
-		case msgStoreModeRequestResponse:
-			if err := v.receiving.(rx.MonoProducer).Success(input); err != nil {
-				input.Release()
+	case msgStoreModeRequestStream, msgStoreModeRequestChannel:
+		receiving := v.receiving.(rx.Producer)
+		if fg.Check(framing.FlagNext) {
+			if err := receiving.Next(pl); err != nil {
+				pl.Release()
 				logger.Warnf("produce payload failed: %s\n", err.Error())
 			}
-		case msgStoreModeRequestStream, msgStoreModeRequestChannel:
-			receiving := v.receiving.(rx.Producer)
-			if fg.Check(framing.FlagNext) {
-				if err := receiving.Next(input); err != nil {
-					input.Release()
-					logger.Warnf("produce payload failed: %s\n", err.Error())
-				}
-			}
-			if fg.Check(framing.FlagComplete) {
-				receiving.Complete()
-				if !fg.Check(framing.FlagNext) {
-					input.Release()
-				}
-			}
-		default:
-			panic("unreachable")
 		}
-		return
-	})
+		if fg.Check(framing.FlagComplete) {
+			receiving.Complete()
+			if !fg.Check(framing.FlagNext) {
+				pl.Release()
+			}
+		}
+	default:
+		panic("unreachable")
+	}
+	return
+}
+
+func (p *duplexRSocket) start() {
+	p.tp.HandleCancel(p.onFrameCancel)
+	p.tp.HandleError(p.onFrameError)
+	p.tp.HandleRequestN(p.onFrameRequestN)
+	p.tp.HandlePayload(p.onFramePayload)
 }
 
 func (p *duplexRSocket) toSender(sid uint32, fg framing.FrameFlag) rx.OptSubscribe {
@@ -536,6 +560,7 @@ func newDuplexRSocket(tp transport.Transport, serverMode bool, scheduler rx.Sche
 			serverMode: serverMode,
 			cur:        0,
 		},
+		fragments: &sync.Map{},
 	}
 	tp.OnClose(sk.releaseAll)
 	sk.start()

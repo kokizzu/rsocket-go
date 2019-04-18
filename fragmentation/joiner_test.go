@@ -1,4 +1,4 @@
-package transport
+package fragmentation
 
 import (
 	"fmt"
@@ -11,7 +11,7 @@ import (
 func TestFragmentPayload(t *testing.T) {
 	const totals = 10
 	const sid = uint32(1)
-	fr := newFragmentPayload(framing.NewFramePayload(sid, []byte("(ROOT)"), []byte("(ROOT)"), framing.FlagFollow, framing.FlagMetadata))
+	fr := NewJoiner(framing.NewFramePayload(sid, []byte("(ROOT)"), []byte("(ROOT)"), framing.FlagFollow, framing.FlagMetadata))
 	defer fr.Release()
 	for i := 0; i < totals; i++ {
 		data := fmt.Sprintf("(data%04d)", i)
@@ -24,10 +24,10 @@ func TestFragmentPayload(t *testing.T) {
 		} else {
 			frame = framing.NewFramePayload(sid, []byte(data), nil)
 		}
-		fr.push(frame)
+		fr.Push(frame)
 	}
 	m, _ := fr.MetadataUTF8()
+	log.Println("header:", fr.Header())
 	log.Println("metadata:", m)
 	log.Println("data:", fr.DataUTF8())
-
 }
