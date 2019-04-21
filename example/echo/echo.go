@@ -21,8 +21,7 @@ func init() {
 }
 
 func main() {
-	logger.SetLoggerLevel(logger.LogLevelInfo)
-	//logger.SetLoggerLevel(logger.LogLevelDebug)
+	logger.SetLoggerLevel(logger.LogLevelDebug)
 	err := createEchoServer("127.0.0.1", 7878)
 	panic(err)
 }

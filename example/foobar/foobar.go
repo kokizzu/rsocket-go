@@ -14,8 +14,9 @@ import (
 func main() {
 	logger.SetLoggerLevel(logger.LogLevelDebug)
 	cli, err := rsocket.Connect().
-		SetupPayload(payload.NewString("hello", "worle")).
-		Transport("tcp://127.0.0.1:8088").
+		Fragment(128).
+		SetupPayload(payload.NewString("hello", "world")).
+		Transport("tcp://127.0.0.1:8000").
 		Start()
 	if err != nil {
 		panic(err)
@@ -23,8 +24,16 @@ func main() {
 	defer func() {
 		_ = cli.Close()
 	}()
-	cli.RequestResponse(payload.NewString(strings.Repeat("c", 4096), "foobar")).
-		DoOnSuccess(func(ctx context.Context, s rx.Subscription, elem payload.Payload) {
+	sending := payload.NewString(strings.Repeat("g", 373), "foobar")
+	/*cli.RequestResponse(sending).
+	DoOnSuccess(func(ctx context.Context, s rx.Subscription, elem payload.Payload) {
+		log.Println("data len:", len(elem.Data()))
+		log.Println(elem)
+	}).
+	Subscribe(context.Background())*/
+
+	cli.RequestStream(sending).
+		DoOnNext(func(ctx context.Context, s rx.Subscription, elem payload.Payload) {
 			log.Println("data len:", len(elem.Data()))
 			log.Println(elem)
 		}).

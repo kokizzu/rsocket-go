@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/rsocket/rsocket-go"
-	"github.com/rsocket/rsocket-go/payload"
-	"github.com/rsocket/rsocket-go/rx"
-	"github.com/stretchr/testify/assert"
 	"log"
 	_ "net/http/pprof"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rsocket/rsocket-go"
+	"github.com/rsocket/rsocket-go/payload"
+	"github.com/rsocket/rsocket-go/rx"
+	"github.com/stretchr/testify/assert"
 )
 
 func doOnce(host string, port int, totals int) {
@@ -48,25 +49,6 @@ func doOnce(host string, port int, totals int) {
 	for _, client := range clients {
 		_ = client.Close()
 	}
-}
-
-func TestClients_RequestResponse(t *testing.T) {
-	log.Println("---------------")
-	doOnce("127.0.0.1", 7878, 10000)
-	//log.Println("---------------")
-	//doOnce(host, 8000)
-	//log.Println("---------------")
-	//doOnce(host, 8001)
-	//log.Println("---------------")
-	//doOnce(host, 8000)
-	//log.Println("---------------")
-	//doOnce(host, 8001)
-	//log.Println("---------------")
-	//doOnce(host, 8000)
-	//log.Println("---------------")
-	//doOnce(host, 8001)
-	//log.Println("---------------")
-	//doOnce(host, 8000)
 }
 
 func TestClient_RequestResponse(t *testing.T) {
@@ -119,4 +101,9 @@ func createClient(host string, port int) rsocket.ClientSocket {
 		panic(err)
 	}
 	return client
+}
+
+func TestClients_RequestResponse(t *testing.T) {
+	log.Println("---------------")
+	doOnce("127.0.0.1", 7878, 10000)
 }

@@ -188,7 +188,7 @@ func (p *implClientBuilder) Start() (ClientSocket, error) {
 	for _, it := range p.onCloses {
 		tp.OnClose(it)
 	}
-	requester := newDuplexRSocket(tp, false, sendingScheduler)
+	requester := newDuplexRSocket(tp, false, sendingScheduler, p.fragment)
 	if p.acceptor != nil {
 		requester.bindResponder(p.acceptor(requester))
 	}
